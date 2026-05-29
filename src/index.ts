@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import { z } from "zod";
-import { docsGet, docsBatchUpdate } from "./docsClient.js";
+import { docsGet, docsBatchUpdate } from "./docsClient";
 import {
   DOC_ID,
   VENTURE_TABS,
@@ -17,7 +17,7 @@ import {
   formatItem,
   todayStr,
   paragraphToText,
-} from "./utils.js";
+} from "./utils";
 
 const server = new McpServer({
   name: "open-loops-mcp-server",
