@@ -2,16 +2,16 @@
   "name": "open-loops-mcp-server",
   "version": "1.0.0",
   "description": "MCP server for Keyona's Open Loops Google Doc — tab-level read/write via Google Docs API",
-  "main": "dist/index.js",
+  "main": "src/index.ts",
   "scripts": {
-    "build": "node --max-old-space-size=1024 node_modules/.bin/tsc",
-    "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "build": "echo 'no build step needed'",
+    "start": "tsx src/index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.0",
     "axios": "^1.6.0",
     "express": "^4.18.2",
+    "tsx": "^4.7.0",
     "zod": "^3.22.4"
   },
   "devDependencies": {
