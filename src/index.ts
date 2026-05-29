@@ -5,29 +5,28 @@ import { z } from "zod";
 import { docsGet, docsBatchUpdate } from "./docsClient";
 import {
   DOC_ID,
-  SECTION_HEADERS,
-  SectionType,
   findTab,
   listTabNames,
   getTabText,
-  parseTabItems,
-  filterOpen,
-  findSectionInsertPoint,
-  formatItem,
-  todayStr,
-  paragraphToText,
+  findTextInTab,
+  findInsertPointAfter,
+  getTabEndIndex,
 } from "./utils";
 
 const server = new McpServer({
-  name: "open-loops-mcp-server",
-  version: "1.0.0",
+  name: "gdocs-mcp-server",
+  version: "2.0.0",
 });
 
+// ─── Tool 1: List tabs ────────────────────────────────────────────────────────
+
 server.registerTool(
-  "open_loops_list_tabs",
+  "gdocs_list_tabs",
   {
-    title: "List Open Loops Tabs",
-    description: `List all tab names in a Google Doc. Always call this first to discover available tabs before reading or writing. Returns the live tab names exactly as they exist in the document.`,
+    title: "List Document Tabs",
+    description: `List all tab names in a Google Doc.
+Always call this first to discover available tabs before any read or write operation.
+Returns tab names exactly as they appear in the document.`,
     inputSchema: z.object({}),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -38,16 +37,19 @@ server.registerTool(
   }
 );
 
+// ─── Tool 2: Read tab ─────────────────────────────────────────────────────────
+
 server.registerTool(
-  "open_loops_read_tab",
+  "gdocs_read_tab",
   {
-    title: "Read Open Loops Tab",
-    description: `Read the full text content of a specific tab by name. Call open_loops_list_tabs first to get valid tab names.
+    title: "Read Tab Content",
+    description: `Read the full plain-text content of a specific tab in a Google Doc.
+Call gdocs_list_tabs first to get valid tab names.
 Args:
-  - tab_name: Exact tab name as returned by open_loops_list_tabs
-Returns: Full text of the tab including all Tasks, Projects, and Threads.`,
+  - tab_name: Exact tab name as returned by gdocs_list_tabs
+Returns: Full plain text of the tab.`,
     inputSchema: z.object({
-      tab_name: z.string().describe("Exact tab name as returned by open_loops_list_tabs"),
+      tab_name: z.string().describe("Exact tab name as returned by gdocs_list_tabs"),
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -57,178 +59,158 @@ Returns: Full text of the tab including all Tasks, Projects, and Threads.`,
     if (!tab) {
       return { content: [{ type: "text", text: `Tab "${tab_name}" not found. Available: ${listTabNames(doc).join(", ")}` }] };
     }
-    return { content: [{ type: "text", text: getTabText(tab) || "(empty)" }] };
+    const text = getTabText(tab);
+    return { content: [{ type: "text", text: text || "(tab is empty)" }] };
   }
 );
 
-server.registerTool(
-  "open_loops_get_open_items",
-  {
-    title: "Get Open Items",
-    description: `Get all OPEN and WAITING items from one or all tabs. Use at session open to surface what is currently in play.
-Args:
-  - tab_name: (optional) Exact tab name to filter. Omit to return all tabs.
-Returns: Items grouped by tab and section (TASKS/PROJECTS/THREADS).`,
-    inputSchema: z.object({
-      tab_name: z.string().optional().describe("Optional exact tab name. Omit for all tabs."),
-    }),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  async ({ tab_name }) => {
-    const doc = await docsGet(DOC_ID);
-    const tabsToRead = tab_name ? [findTab(doc, tab_name)].filter(Boolean) : (doc.tabs ?? []);
-    const result: Record<string, Record<string, unknown[]>> = {};
-
-    for (const tab of tabsToRead) {
-      if (!tab) continue;
-      const title = tab.tabProperties.title;
-      const open = filterOpen(parseTabItems(getTabText(tab)));
-      if (open.length === 0) continue;
-      result[title] = { TASKS: [], PROJECTS: [], THREADS: [] };
-      for (const item of open) {
-        result[title][item.type].push({ status: item.status, text: item.text, notes: item.notes, added: item.addedDate });
-      }
-      for (const sec of SECTION_HEADERS) {
-        if ((result[title][sec] as unknown[]).length === 0) delete result[title][sec];
-      }
-      if (Object.keys(result[title]).length === 0) delete result[title];
-    }
-
-    if (Object.keys(result).length === 0) {
-      return { content: [{ type: "text", text: "No open or waiting items found." }] };
-    }
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  }
-);
+// ─── Tool 3: Append to tab ────────────────────────────────────────────────────
 
 server.registerTool(
-  "open_loops_append_item",
+  "gdocs_append_to_tab",
   {
-    title: "Append Item to Open Loops",
-    description: `Add a Task, Project, or Thread to a specific section within a specific tab.
+    title: "Append Text to Tab",
+    description: `Append text to the end of a specific tab in a Google Doc.
 Args:
-  - tab_name: Exact tab name as returned by open_loops_list_tabs
-  - section: TASKS, PROJECTS, or THREADS
-  - text: Item description
-  - notes: Context, next action, or follow-up date
-  - status: OPEN or WAITING
-Returns: Confirmation of what was added.`,
+  - tab_name: Exact tab name as returned by gdocs_list_tabs
+  - text: Text to append. Use \\n for newlines.
+Returns: Confirmation of what was appended.`,
     inputSchema: z.object({
-      tab_name: z.string().describe("Exact tab name as returned by open_loops_list_tabs"),
-      section: z.enum(SECTION_HEADERS).describe("TASKS, PROJECTS, or THREADS"),
-      text: z.string().min(1).describe("Item description"),
-      notes: z.string().optional().default("").describe("Context, next action, or follow-up info"),
-      status: z.enum(["OPEN", "WAITING"]).optional().default("OPEN"),
+      tab_name: z.string().describe("Exact tab name"),
+      text: z.string().min(1).describe("Text to append. Use \\n for newlines."),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
-  async ({ tab_name, section, text, notes, status }) => {
+  async ({ tab_name, text }) => {
     const doc = await docsGet(DOC_ID);
     const tab = findTab(doc, tab_name);
     if (!tab) {
       return { content: [{ type: "text", text: `Tab "${tab_name}" not found. Available: ${listTabNames(doc).join(", ")}` }] };
     }
 
-    const bounds = findSectionInsertPoint(tab, section as SectionType);
-    if (!bounds) {
-      return { content: [{ type: "text", text: `Could not find section "${section}" in tab "${tab_name}".` }] };
-    }
-
-    const itemText = formatItem(text, notes ?? "", status, todayStr());
-    const tabId = tab.tabProperties.tabId;
-    const requests: unknown[] = [];
-
-    if (bounds.hasPlaceholder) {
-      requests.push({ deleteContentRange: { range: { startIndex: bounds.placeholderStart, endIndex: bounds.placeholderEnd, tabId } } });
-      requests.push({ insertText: { text: itemText, location: { index: bounds.placeholderStart, tabId } } });
-    } else {
-      requests.push({ insertText: { text: itemText, location: { index: bounds.insertBeforeIndex, tabId } } });
-    }
-
-    await docsBatchUpdate(DOC_ID, requests);
-    return { content: [{ type: "text", text: `Added to ${tab_name} / ${section}:\n${itemText.trim()}` }] };
-  }
-);
-
-server.registerTool(
-  "open_loops_update_item",
-  {
-    title: "Update Open Loops Item",
-    description: `Update an existing item — mark done, dropped, or update its notes.
-Args:
-  - tab_name: Exact tab name as returned by open_loops_list_tabs
-  - section: TASKS, PROJECTS, or THREADS
-  - match_text: Partial text to uniquely identify the item
-  - new_status: OPEN, WAITING, DONE, or DROPPED
-  - new_notes: (optional) Updated notes — keeps existing if omitted
-Returns: Before and after confirmation.`,
-    inputSchema: z.object({
-      tab_name: z.string().describe("Exact tab name as returned by open_loops_list_tabs"),
-      section: z.enum(SECTION_HEADERS).describe("TASKS, PROJECTS, or THREADS"),
-      match_text: z.string().min(3).describe("Partial item text to match"),
-      new_status: z.enum(["OPEN", "WAITING", "DONE", "DROPPED"]),
-      new_notes: z.string().optional().describe("Updated notes — keeps existing if omitted"),
-    }),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-  },
-  async ({ tab_name, section, match_text, new_status, new_notes }) => {
-    const doc = await docsGet(DOC_ID);
-    const tab = findTab(doc, tab_name);
-    if (!tab) return { content: [{ type: "text", text: `Tab "${tab_name}" not found.` }] };
-
-    const content = tab.documentTab?.body?.content ?? [];
-    const lowerMatch = match_text.toLowerCase();
-    const SECTION_RE = /──\s*(TASKS|PROJECTS|THREADS)\s*──/;
-    let inTargetSection = false;
-    let targetPara: { text: string; start: number; end: number } | null = null;
-
-    for (const el of content) {
-      if (!el.paragraph || el.startIndex === undefined || el.endIndex === undefined) continue;
-      const paraText = paragraphToText(el.paragraph);
-      const sectionMatch = paraText.match(SECTION_RE);
-      if (sectionMatch) { inTargetSection = sectionMatch[1] === section; continue; }
-      if (inTargetSection && paraText.toLowerCase().includes(lowerMatch)) {
-        targetPara = { text: paraText, start: el.startIndex, end: el.endIndex };
-        break;
-      }
-    }
-
-    if (!targetPara) {
-      return { content: [{ type: "text", text: `Could not find "${match_text}" in ${tab_name} / ${section}.` }] };
-    }
-
-    const existingItems = parseTabItems(targetPara.text);
-    const existingItem = existingItems[0];
-    const itemText = existingItem?.text ?? match_text;
-    const notesToUse = new_notes !== undefined ? new_notes : (existingItem?.notes ?? "");
-    const addedDate = existingItem?.addedDate ?? todayStr();
-    const notePart = notesToUse ? ` (${notesToUse})` : "";
-
-    let newLine: string;
-    if (new_status === "DONE") {
-      newLine = `[x] ${itemText}${notePart} [DONE | ${todayStr()}]\n`;
-    } else if (new_status === "DROPPED") {
-      newLine = `[-] ${itemText}${notePart} [DROPPED | ${todayStr()}]\n`;
-    } else {
-      newLine = formatItem(itemText, notesToUse, new_status, addedDate);
+    const insertIndex = getTabEndIndex(tab);
+    if (insertIndex === null) {
+      return { content: [{ type: "text", text: `Could not determine insert position in tab "${tab_name}".` }] };
     }
 
     const tabId = tab.tabProperties.tabId;
     await docsBatchUpdate(DOC_ID, [
-      { deleteContentRange: { range: { startIndex: targetPara.start, endIndex: targetPara.end, tabId } } },
-      { insertText: { text: newLine, location: { index: targetPara.start, tabId } } },
+      { insertText: { text, location: { index: insertIndex, tabId } } },
     ]);
 
-    return { content: [{ type: "text", text: `Updated in ${tab_name} / ${section}:\nBefore: ${targetPara.text.trim()}\nAfter:  ${newLine.trim()}` }] };
+    return { content: [{ type: "text", text: `Appended to "${tab_name}":\n${text}` }] };
   }
 );
+
+// ─── Tool 4: Insert after text ────────────────────────────────────────────────
+
+server.registerTool(
+  "gdocs_insert_after",
+  {
+    title: "Insert Text After String",
+    description: `Insert text immediately after the first occurrence of a specific string in a tab.
+Useful for inserting a new line after a section header or a specific existing line.
+Args:
+  - tab_name: Exact tab name
+  - after_text: The string to search for — new text will be inserted immediately after it
+  - insert_text: Text to insert. Use \\n for newlines.
+Returns: Confirmation, or an error if the search string was not found.`,
+    inputSchema: z.object({
+      tab_name: z.string().describe("Exact tab name"),
+      after_text: z.string().min(1).describe("String to insert after (first match)"),
+      insert_text: z.string().min(1).describe("Text to insert after the match"),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ tab_name, after_text, insert_text }) => {
+    const doc = await docsGet(DOC_ID);
+    const tab = findTab(doc, tab_name);
+    if (!tab) {
+      return { content: [{ type: "text", text: `Tab "${tab_name}" not found. Available: ${listTabNames(doc).join(", ")}` }] };
+    }
+
+    const insertIndex = findInsertPointAfter(tab, after_text);
+    if (insertIndex === null) {
+      return { content: [{ type: "text", text: `Could not find "${after_text}" in tab "${tab_name}".` }] };
+    }
+
+    const tabId = tab.tabProperties.tabId;
+    await docsBatchUpdate(DOC_ID, [
+      { insertText: { text: insert_text, location: { index: insertIndex, tabId } } },
+    ]);
+
+    return { content: [{ type: "text", text: `Inserted after "${after_text}" in "${tab_name}":\n${insert_text}` }] };
+  }
+);
+
+// ─── Tool 5: Find and replace ─────────────────────────────────────────────────
+
+server.registerTool(
+  "gdocs_find_replace",
+  {
+    title: "Find and Replace Text in Tab",
+    description: `Find a specific string in a tab and replace it with new text.
+Replaces the first occurrence only. Use for updating existing lines — marking items done, changing status, updating notes.
+Args:
+  - tab_name: Exact tab name
+  - find_text: Exact text to find (must match exactly including spacing)
+  - replace_text: Text to replace it with. Use empty string to delete.
+Returns: Confirmation showing what was replaced, or an error if not found.`,
+    inputSchema: z.object({
+      tab_name: z.string().describe("Exact tab name"),
+      find_text: z.string().min(1).describe("Exact text to find"),
+      replace_text: z.string().describe("Replacement text (empty string to delete)"),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ tab_name, find_text, replace_text }) => {
+    const doc = await docsGet(DOC_ID);
+    const tab = findTab(doc, tab_name);
+    if (!tab) {
+      return { content: [{ type: "text", text: `Tab "${tab_name}" not found. Available: ${listTabNames(doc).join(", ")}` }] };
+    }
+
+    const location = findTextInTab(tab, find_text);
+    if (!location) {
+      return { content: [{ type: "text", text: `Could not find "${find_text}" in tab "${tab_name}".` }] };
+    }
+
+    const tabId = tab.tabProperties.tabId;
+    const requests: unknown[] = [
+      {
+        deleteContentRange: {
+          range: { startIndex: location.startIndex, endIndex: location.endIndex, tabId },
+        },
+      },
+    ];
+
+    if (replace_text.length > 0) {
+      requests.push({
+        insertText: {
+          text: replace_text,
+          location: { index: location.startIndex, tabId },
+        },
+      });
+    }
+
+    await docsBatchUpdate(DOC_ID, requests);
+    return {
+      content: [{
+        type: "text",
+        text: `Replaced in "${tab_name}":\nBefore: ${find_text}\nAfter:  ${replace_text || "(deleted)"}`,
+      }],
+    };
+  }
+);
+
+// ─── HTTP server ──────────────────────────────────────────────────────────────
 
 async function runHTTP(): Promise<void> {
   const app = express();
   app.use(express.json());
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", service: "open-loops-mcp-server" });
+    res.json({ status: "ok", service: "gdocs-mcp-server", version: "2.0.0" });
   });
 
   app.post("/mcp", async (req, res) => {
@@ -243,7 +225,7 @@ async function runHTTP(): Promise<void> {
 
   const port = parseInt(process.env.PORT || "3000");
   app.listen(port, () => {
-    console.error(`Open Loops MCP running on port ${port}`);
+    console.error(`Google Docs MCP running on port ${port}`);
   });
 }
 
