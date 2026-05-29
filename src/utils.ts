@@ -3,18 +3,10 @@ import {
   DocsTab,
   StructuralElement,
   Paragraph,
-} from "./docsClient.js";
+} from "./docsClient";
 
 export const DOC_ID =
   process.env.OPEN_LOOPS_DOC_ID || "1TgwkOUKyZH36uBmK4fkgwA6fmxihx5IduEapqr0EGRo";
-
-export const VENTURE_TABS = [
-  "ReRev Labs",
-  "Black Tech Capital",
-  "Prismm",
-  "Sekhmetic",
-  "Personal",
-];
 
 export const SECTION_HEADERS = ["TASKS", "PROJECTS", "THREADS"] as const;
 export type SectionType = (typeof SECTION_HEADERS)[number];
@@ -124,7 +116,7 @@ export function findSectionInsertPoint(
   }
 
   const headerIdx = paras.findIndex(
-    (p) => p.text.includes(`── ${section} ──`) || SECTION_MARKER_RE.test(p.text) && p.text.includes(section)
+    (p) => p.text.includes(`── ${section} ──`) || (SECTION_MARKER_RE.test(p.text) && p.text.includes(section))
   );
   if (headerIdx === -1) return null;
 
@@ -134,7 +126,6 @@ export function findSectionInsertPoint(
   const endIdx = nextSectionIdx === -1 ? paras.length : nextSectionIdx;
 
   const sectionParas = paras.slice(headerIdx + 1, endIdx);
-
   const placeholderPara = sectionParas.find((p) => p.text.trim() === "(nothing yet)");
 
   if (placeholderPara) {
