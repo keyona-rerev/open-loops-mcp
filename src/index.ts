@@ -5,7 +5,6 @@ import { z } from "zod";
 import { docsGet, docsBatchUpdate } from "./docsClient";
 import {
   DOC_ID,
-  VENTURE_TABS,
   SECTION_HEADERS,
   SectionType,
   findTab,
@@ -28,9 +27,7 @@ server.registerTool(
   "open_loops_list_tabs",
   {
     title: "List Open Loops Tabs",
-    description: `List all tab names in Keyona's Open Loops Google Doc.
-Returns the current tab names so you know what's available before reading or writing.
-Tabs: ReRev Labs, Black Tech Capital, Prismm, Sekhmetic, Personal.`,
+    description: `List all tab names in a Google Doc. Always call this first to discover available tabs before reading or writing. Returns the live tab names exactly as they exist in the document.`,
     inputSchema: z.object({}),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -45,12 +42,12 @@ server.registerTool(
   "open_loops_read_tab",
   {
     title: "Read Open Loops Tab",
-    description: `Read the full text content of a specific tab in the Open Loops doc.
+    description: `Read the full text content of a specific tab by name. Call open_loops_list_tabs first to get valid tab names.
 Args:
-  - tab_name: One of: ${VENTURE_TABS.join(", ")}
-Returns: Full text of the tab with all Tasks, Projects, and Threads.`,
+  - tab_name: Exact tab name as returned by open_loops_list_tabs
+Returns: Full text of the tab including all Tasks, Projects, and Threads.`,
     inputSchema: z.object({
-      tab_name: z.string().describe(`Venture tab. One of: ${VENTURE_TABS.join(", ")}`),
+      tab_name: z.string().describe("Exact tab name as returned by open_loops_list_tabs"),
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -68,12 +65,12 @@ server.registerTool(
   "open_loops_get_open_items",
   {
     title: "Get Open Items",
-    description: `Get all OPEN and WAITING items from one or all venture tabs.
+    description: `Get all OPEN and WAITING items from one or all tabs. Use at session open to surface what is currently in play.
 Args:
-  - tab_name: (optional) Filter to one tab. Omit for all tabs.
+  - tab_name: (optional) Exact tab name to filter. Omit to return all tabs.
 Returns: Items grouped by tab and section (TASKS/PROJECTS/THREADS).`,
     inputSchema: z.object({
-      tab_name: z.string().optional().describe("Optional venture tab name. Omit for all."),
+      tab_name: z.string().optional().describe("Optional exact tab name. Omit for all tabs."),
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -108,19 +105,19 @@ server.registerTool(
   "open_loops_append_item",
   {
     title: "Append Item to Open Loops",
-    description: `Add a Task, Project, or Thread to the correct section of a venture tab.
+    description: `Add a Task, Project, or Thread to a specific section within a specific tab.
 Args:
-  - tab_name: One of: ${VENTURE_TABS.join(", ")}
+  - tab_name: Exact tab name as returned by open_loops_list_tabs
   - section: TASKS, PROJECTS, or THREADS
   - text: Item description
-  - notes: Context, next action, or follow-up date (for threads)
+  - notes: Context, next action, or follow-up date
   - status: OPEN or WAITING
 Returns: Confirmation of what was added.`,
     inputSchema: z.object({
-      tab_name: z.string().describe(`Venture tab. One of: ${VENTURE_TABS.join(", ")}`),
+      tab_name: z.string().describe("Exact tab name as returned by open_loops_list_tabs"),
       section: z.enum(SECTION_HEADERS).describe("TASKS, PROJECTS, or THREADS"),
       text: z.string().min(1).describe("Item description"),
-      notes: z.string().optional().default("").describe("Context or next action"),
+      notes: z.string().optional().default("").describe("Context, next action, or follow-up info"),
       status: z.enum(["OPEN", "WAITING"]).optional().default("OPEN"),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -157,20 +154,20 @@ server.registerTool(
   "open_loops_update_item",
   {
     title: "Update Open Loops Item",
-    description: `Update an existing item — mark done, dropped, or update notes.
+    description: `Update an existing item — mark done, dropped, or update its notes.
 Args:
-  - tab_name: Venture tab
+  - tab_name: Exact tab name as returned by open_loops_list_tabs
   - section: TASKS, PROJECTS, or THREADS
-  - match_text: Partial text to identify the item
+  - match_text: Partial text to uniquely identify the item
   - new_status: OPEN, WAITING, DONE, or DROPPED
-  - new_notes: (optional) Updated notes
-Returns: Before/after confirmation.`,
+  - new_notes: (optional) Updated notes — keeps existing if omitted
+Returns: Before and after confirmation.`,
     inputSchema: z.object({
-      tab_name: z.string().describe("Venture tab name"),
+      tab_name: z.string().describe("Exact tab name as returned by open_loops_list_tabs"),
       section: z.enum(SECTION_HEADERS).describe("TASKS, PROJECTS, or THREADS"),
       match_text: z.string().min(3).describe("Partial item text to match"),
       new_status: z.enum(["OPEN", "WAITING", "DONE", "DROPPED"]),
-      new_notes: z.string().optional().describe("Updated notes (optional)"),
+      new_notes: z.string().optional().describe("Updated notes — keeps existing if omitted"),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
