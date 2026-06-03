@@ -9,8 +9,10 @@ export const DOC_ID = process.env.GDOCS_DOC_ID || "";
 
 // ─── Doc registry ─────────────────────────────────────────────────────────────
 // Friendly keys → Google Doc IDs, sourced from env vars on Railway.
-// "todo" is the default doc (Open Loops). Add more docs by setting the matching
-// env var here and redeploying — no other code changes required.
+// These are OPTIONAL convenience shortcuts only. The connector can target ANY
+// Google Doc the authenticated account can edit by passing a URL or raw ID, so
+// you do not need to register a doc here to write to it. "todo" is the default
+// when no doc is specified, preserving existing single-doc callers.
 const DOC_REGISTRY: Record<string, string> = {
   todo: DOC_ID,
   radhika: process.env.GDOCS_RADHIKA_DOC_ID || "",
@@ -26,24 +28,37 @@ export function listDocKeys(): string[] {
 
 /**
  * Resolve a doc selector to a concrete Google Doc ID.
- * Accepts a known registry key ("todo", "radhika"), or a raw Google Doc ID for
- * any doc the authenticated account can access. Defaults to the todo doc when
- * nothing is passed, preserving existing single-doc behavior.
+ * Accepts, in priority order:
+ *   1. A friendly registry key ("todo", "radhika") — optional shortcuts.
+ *   2. A full Google Docs URL — the ID is extracted automatically.
+ *   3. A raw Google Doc ID — used as-is.
+ * This lets the connector target ANY Google Doc the authenticated account can
+ * access, not just the registry. Defaults to the todo doc when nothing is
+ * passed, preserving existing single-doc behavior.
  */
 export function resolveDocId(selector?: string): { docId: string; error?: string } {
   const raw = (selector || DEFAULT_DOC_KEY).trim();
+
+  // 1. Friendly registry keys (case-insensitive).
   const key = raw.toLowerCase();
   if (key in DOC_REGISTRY) {
     const id = DOC_REGISTRY[key];
     if (!id) {
       return {
         docId: "",
-        error: `Doc "${raw}" is not configured on the server (missing env var). Configured docs: ${listDocKeys().join(", ") || "(none)"}.`,
+        error: `Shortcut "${raw}" is not configured on the server. Pass a Google Doc URL or ID instead, or set its env var. Configured shortcuts: ${listDocKeys().join(", ") || "(none)"}.`,
       };
     }
     return { docId: id };
   }
-  // Not a known key — treat the string as a raw Google Doc ID.
+
+  // 2. Full Google Docs URL → pull the ID out of /d/<ID> or ?id=<ID>.
+  const fromPath = raw.match(/\/d\/([a-zA-Z0-9_-]{10,})/);
+  if (fromPath) return { docId: fromPath[1] };
+  const fromQuery = raw.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
+  if (fromQuery) return { docId: fromQuery[1] };
+
+  // 3. Otherwise treat the whole string as a raw Google Doc ID.
   return { docId: raw };
 }
 
