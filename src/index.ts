@@ -4,8 +4,8 @@ import express from "express";
 import { z } from "zod";
 import { docsGet, docsBatchUpdate } from "./docsClient";
 import {
-  DOC_ID,
-  findTab,
+  resolveDocId,
+  resolveTab,
   listTabNames,
   getTabText,
   findTextInTab,
@@ -13,10 +13,18 @@ import {
   getTabEndIndex,
 } from "./utils";
 
+const VERSION = "2.1.0";
+
 const server = new McpServer({
   name: "gdocs-mcp-server",
-  version: "2.0.0",
+  version: VERSION,
 });
+
+// Shared selector for which document a tool should target.
+const docArg = z
+  .string()
+  .optional()
+  .describe('Document to target: "todo" (default) or "radhika". A raw Google Doc ID is also accepted.');
 
 // ─── Tool 1: List tabs ────────────────────────────────────────────────────────
 
@@ -26,14 +34,20 @@ server.registerTool(
     title: "List Document Tabs",
     description: `List all tab names in a Google Doc.
 Always call this first to discover available tabs before any read or write operation.
-Returns tab names exactly as they appear in the document.`,
-    inputSchema: z.object({}),
+Returns tab names exactly as they appear in the document.
+Args:
+  - doc: Which document to list — "todo" (default) or "radhika". A raw Google Doc ID also works.`,
+    inputSchema: z.object({
+      doc: docArg,
+    }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
-  async () => {
-    const doc = await docsGet(DOC_ID);
-    const tabs = listTabNames(doc);
-    return { content: [{ type: "text", text: JSON.stringify({ tabs }) }] };
+  async ({ doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const tabs = listTabNames(docData);
+    return { content: [{ type: "text", text: JSON.stringify({ doc: doc || "todo", tabs }) }] };
   }
 );
 
@@ -46,19 +60,21 @@ server.registerTool(
     description: `Read the full plain-text content of a specific tab in a Google Doc.
 Call gdocs_list_tabs first to get valid tab names.
 Args:
-  - tab_name: Exact tab name as returned by gdocs_list_tabs
+  - tab_name: Exact tab name as returned by gdocs_list_tabs. Optional when the doc has a single tab.
+  - doc: Which document — "todo" (default) or "radhika". A raw Google Doc ID also works.
 Returns: Full plain text of the tab.`,
     inputSchema: z.object({
-      tab_name: z.string().describe("Exact tab name as returned by gdocs_list_tabs"),
+      tab_name: z.string().optional().describe("Exact tab name as returned by gdocs_list_tabs. Optional if the doc has only one tab."),
+      doc: docArg,
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
-  async ({ tab_name }) => {
-    const doc = await docsGet(DOC_ID);
-    const tab = findTab(doc, tab_name);
-    if (!tab) {
-      return { content: [{ type: "text", text: `Tab "${tab_name}" not found. Available: ${listTabNames(doc).join(", ")}` }] };
-    }
+  async ({ tab_name, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
     const text = getTabText(tab);
     return { content: [{ type: "text", text: text || "(tab is empty)" }] };
   }
@@ -72,33 +88,35 @@ server.registerTool(
     title: "Append Text to Tab",
     description: `Append text to the end of a specific tab in a Google Doc.
 Args:
-  - tab_name: Exact tab name as returned by gdocs_list_tabs
+  - tab_name: Exact tab name as returned by gdocs_list_tabs. Optional when the doc has a single tab.
   - text: Text to append. Use \\n for newlines.
+  - doc: Which document — "todo" (default) or "radhika". A raw Google Doc ID also works.
 Returns: Confirmation of what was appended.`,
     inputSchema: z.object({
-      tab_name: z.string().describe("Exact tab name"),
+      tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
       text: z.string().min(1).describe("Text to append. Use \\n for newlines."),
+      doc: docArg,
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
-  async ({ tab_name, text }) => {
-    const doc = await docsGet(DOC_ID);
-    const tab = findTab(doc, tab_name);
-    if (!tab) {
-      return { content: [{ type: "text", text: `Tab "${tab_name}" not found. Available: ${listTabNames(doc).join(", ")}` }] };
-    }
+  async ({ tab_name, text, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
 
     const insertIndex = getTabEndIndex(tab);
     if (insertIndex === null) {
-      return { content: [{ type: "text", text: `Could not determine insert position in tab "${tab_name}".` }] };
+      return { content: [{ type: "text", text: `Could not determine insert position in tab "${tab.tabProperties.title}".` }] };
     }
 
     const tabId = tab.tabProperties.tabId;
-    await docsBatchUpdate(DOC_ID, [
+    await docsBatchUpdate(docId, [
       { insertText: { text, location: { index: insertIndex, tabId } } },
     ]);
 
-    return { content: [{ type: "text", text: `Appended to "${tab_name}":\n${text}` }] };
+    return { content: [{ type: "text", text: `Appended to "${tab.tabProperties.title}":\n${text}` }] };
   }
 );
 
@@ -111,35 +129,37 @@ server.registerTool(
     description: `Insert text immediately after the first occurrence of a specific string in a tab.
 Useful for inserting a new line after a section header or a specific existing line.
 Args:
-  - tab_name: Exact tab name
+  - tab_name: Exact tab name. Optional when the doc has a single tab.
   - after_text: The string to search for — new text will be inserted immediately after it
   - insert_text: Text to insert. Use \\n for newlines.
+  - doc: Which document — "todo" (default) or "radhika". A raw Google Doc ID also works.
 Returns: Confirmation, or an error if the search string was not found.`,
     inputSchema: z.object({
-      tab_name: z.string().describe("Exact tab name"),
+      tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
       after_text: z.string().min(1).describe("String to insert after (first match)"),
       insert_text: z.string().min(1).describe("Text to insert after the match"),
+      doc: docArg,
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
-  async ({ tab_name, after_text, insert_text }) => {
-    const doc = await docsGet(DOC_ID);
-    const tab = findTab(doc, tab_name);
-    if (!tab) {
-      return { content: [{ type: "text", text: `Tab "${tab_name}" not found. Available: ${listTabNames(doc).join(", ")}` }] };
-    }
+  async ({ tab_name, after_text, insert_text, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
 
     const insertIndex = findInsertPointAfter(tab, after_text);
     if (insertIndex === null) {
-      return { content: [{ type: "text", text: `Could not find "${after_text}" in tab "${tab_name}".` }] };
+      return { content: [{ type: "text", text: `Could not find "${after_text}" in tab "${tab.tabProperties.title}".` }] };
     }
 
     const tabId = tab.tabProperties.tabId;
-    await docsBatchUpdate(DOC_ID, [
+    await docsBatchUpdate(docId, [
       { insertText: { text: insert_text, location: { index: insertIndex, tabId } } },
     ]);
 
-    return { content: [{ type: "text", text: `Inserted after "${after_text}" in "${tab_name}":\n${insert_text}` }] };
+    return { content: [{ type: "text", text: `Inserted after "${after_text}" in "${tab.tabProperties.title}":\n${insert_text}` }] };
   }
 );
 
@@ -152,27 +172,29 @@ server.registerTool(
     description: `Find a specific string in a tab and replace it with new text.
 Replaces the first occurrence only. Use for updating existing lines — marking items done, changing status, updating notes.
 Args:
-  - tab_name: Exact tab name
+  - tab_name: Exact tab name. Optional when the doc has a single tab.
   - find_text: Exact text to find (must match exactly including spacing)
   - replace_text: Text to replace it with. Use empty string to delete.
+  - doc: Which document — "todo" (default) or "radhika". A raw Google Doc ID also works.
 Returns: Confirmation showing what was replaced, or an error if not found.`,
     inputSchema: z.object({
-      tab_name: z.string().describe("Exact tab name"),
+      tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
       find_text: z.string().min(1).describe("Exact text to find"),
       replace_text: z.string().describe("Replacement text (empty string to delete)"),
+      doc: docArg,
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
-  async ({ tab_name, find_text, replace_text }) => {
-    const doc = await docsGet(DOC_ID);
-    const tab = findTab(doc, tab_name);
-    if (!tab) {
-      return { content: [{ type: "text", text: `Tab "${tab_name}" not found. Available: ${listTabNames(doc).join(", ")}` }] };
-    }
+  async ({ tab_name, find_text, replace_text, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
 
     const location = findTextInTab(tab, find_text);
     if (!location) {
-      return { content: [{ type: "text", text: `Could not find "${find_text}" in tab "${tab_name}".` }] };
+      return { content: [{ type: "text", text: `Could not find "${find_text}" in tab "${tab.tabProperties.title}".` }] };
     }
 
     const tabId = tab.tabProperties.tabId;
@@ -193,11 +215,11 @@ Returns: Confirmation showing what was replaced, or an error if not found.`,
       });
     }
 
-    await docsBatchUpdate(DOC_ID, requests);
+    await docsBatchUpdate(docId, requests);
     return {
       content: [{
         type: "text",
-        text: `Replaced in "${tab_name}":\nBefore: ${find_text}\nAfter:  ${replace_text || "(deleted)"}`,
+        text: `Replaced in "${tab.tabProperties.title}":\nBefore: ${find_text}\nAfter:  ${replace_text || "(deleted)"}`,
       }],
     };
   }
@@ -210,7 +232,7 @@ async function runHTTP(): Promise<void> {
   app.use(express.json());
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", service: "gdocs-mcp-server", version: "2.0.0" });
+    res.json({ status: "ok", service: "gdocs-mcp-server", version: VERSION });
   });
 
   app.post("/mcp", async (req, res) => {
@@ -225,7 +247,7 @@ async function runHTTP(): Promise<void> {
 
   const port = parseInt(process.env.PORT || "3000");
   app.listen(port, () => {
-    console.error(`Google Docs MCP running on port ${port}`);
+    console.error(`Google Docs MCP v${VERSION} running on port ${port}`);
   });
 }
 
