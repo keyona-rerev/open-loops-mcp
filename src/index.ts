@@ -13,7 +13,7 @@ import {
   getTabEndIndex,
 } from "./utils";
 
-const VERSION = "2.1.0";
+const VERSION = "2.2.0";
 
 const server = new McpServer({
   name: "gdocs-mcp-server",
@@ -24,7 +24,7 @@ const server = new McpServer({
 const docArg = z
   .string()
   .optional()
-  .describe('Document to target: "todo" (default) or "radhika". A raw Google Doc ID is also accepted.');
+  .describe('Which Google Doc to target. Pass a full Google Doc URL or its document ID to target ANY doc the connected Google account can edit. The shortcuts "todo" (default) and "radhika" also work. Omit to use the default todo doc.');
 
 // ─── Tool 1: List tabs ────────────────────────────────────────────────────────
 
@@ -36,7 +36,7 @@ server.registerTool(
 Always call this first to discover available tabs before any read or write operation.
 Returns tab names exactly as they appear in the document.
 Args:
-  - doc: Which document to list — "todo" (default) or "radhika". A raw Google Doc ID also works.`,
+  - doc: Which doc to list. A Google Doc URL or document ID targets any doc the account can access; "todo" (default) and "radhika" are optional shortcuts.`,
     inputSchema: z.object({
       doc: docArg,
     }),
@@ -61,7 +61,7 @@ server.registerTool(
 Call gdocs_list_tabs first to get valid tab names.
 Args:
   - tab_name: Exact tab name as returned by gdocs_list_tabs. Optional when the doc has a single tab.
-  - doc: Which document — "todo" (default) or "radhika". A raw Google Doc ID also works.
+  - doc: A Google Doc URL or document ID targets any doc the account can access; "todo" (default) and "radhika" are optional shortcuts.
 Returns: Full plain text of the tab.`,
     inputSchema: z.object({
       tab_name: z.string().optional().describe("Exact tab name as returned by gdocs_list_tabs. Optional if the doc has only one tab."),
@@ -90,7 +90,7 @@ server.registerTool(
 Args:
   - tab_name: Exact tab name as returned by gdocs_list_tabs. Optional when the doc has a single tab.
   - text: Text to append. Use \\n for newlines.
-  - doc: Which document — "todo" (default) or "radhika". A raw Google Doc ID also works.
+  - doc: A Google Doc URL or document ID targets any doc the account can edit; "todo" (default) and "radhika" are optional shortcuts.
 Returns: Confirmation of what was appended.`,
     inputSchema: z.object({
       tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
@@ -132,7 +132,7 @@ Args:
   - tab_name: Exact tab name. Optional when the doc has a single tab.
   - after_text: The string to search for — new text will be inserted immediately after it
   - insert_text: Text to insert. Use \\n for newlines.
-  - doc: Which document — "todo" (default) or "radhika". A raw Google Doc ID also works.
+  - doc: A Google Doc URL or document ID targets any doc the account can edit; "todo" (default) and "radhika" are optional shortcuts.
 Returns: Confirmation, or an error if the search string was not found.`,
     inputSchema: z.object({
       tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
@@ -175,7 +175,7 @@ Args:
   - tab_name: Exact tab name. Optional when the doc has a single tab.
   - find_text: Exact text to find (must match exactly including spacing)
   - replace_text: Text to replace it with. Use empty string to delete.
-  - doc: Which document — "todo" (default) or "radhika". A raw Google Doc ID also works.
+  - doc: A Google Doc URL or document ID targets any doc the account can edit; "todo" (default) and "radhika" are optional shortcuts.
 Returns: Confirmation showing what was replaced, or an error if not found.`,
     inputSchema: z.object({
       tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
