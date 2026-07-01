@@ -13,7 +13,7 @@ import {
   getTabEndIndex,
 } from "./utils";
 
-const VERSION = "2.2.0";
+const VERSION = "2.3.0";
 
 const server = new McpServer({
   name: "gdocs-mcp-server",
@@ -222,6 +222,180 @@ Returns: Confirmation showing what was replaced, or an error if not found.`,
         text: `Replaced in "${tab.tabProperties.title}":\nBefore: ${find_text}\nAfter:  ${replace_text || "(deleted)"}`,
       }],
     };
+  }
+);
+
+// ─── Tool 6: Format text (bold / italic / strikethrough / underline) ──────────
+
+server.registerTool(
+  "gdocs_format_text",
+  {
+    title: "Format Text in Tab",
+    description: `Apply character formatting (bold, italic, strikethrough, underline) to the first occurrence of a string in a tab.
+Reuses the same range-finding as find_replace, but changes STYLE instead of content. Ideal for striking through a line when a to-do item is done.
+Args:
+  - tab_name: Exact tab name. Optional when the doc has a single tab.
+  - find_text: Exact text to style (first match).
+  - bold / italic / strikethrough / underline: Optional booleans. Pass true to turn a style on, false to turn it off. Omitted styles are left unchanged.
+  - doc: A Google Doc URL or ID; "todo" (default) and "radhika" are shortcuts.
+Returns: Confirmation, or an error if the string was not found.`,
+    inputSchema: z.object({
+      tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
+      find_text: z.string().min(1).describe("Exact text to style (first match)"),
+      bold: z.boolean().optional().describe("Set bold on/off"),
+      italic: z.boolean().optional().describe("Set italic on/off"),
+      strikethrough: z.boolean().optional().describe("Set strikethrough on/off"),
+      underline: z.boolean().optional().describe("Set underline on/off"),
+      doc: docArg,
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ tab_name, find_text, bold, italic, strikethrough, underline, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
+
+    const location = findTextInTab(tab, find_text);
+    if (!location) {
+      return { content: [{ type: "text", text: `Could not find "${find_text}" in tab "${tab.tabProperties.title}".` }] };
+    }
+
+    const textStyle: Record<string, boolean> = {};
+    const fields: string[] = [];
+    if (bold !== undefined) { textStyle.bold = bold; fields.push("bold"); }
+    if (italic !== undefined) { textStyle.italic = italic; fields.push("italic"); }
+    if (strikethrough !== undefined) { textStyle.strikethrough = strikethrough; fields.push("strikethrough"); }
+    if (underline !== undefined) { textStyle.underline = underline; fields.push("underline"); }
+
+    if (fields.length === 0) {
+      return { content: [{ type: "text", text: "No styles specified. Pass at least one of bold, italic, strikethrough, underline." }] };
+    }
+
+    const tabId = tab.tabProperties.tabId;
+    await docsBatchUpdate(docId, [
+      {
+        updateTextStyle: {
+          range: { startIndex: location.startIndex, endIndex: location.endIndex, tabId },
+          textStyle,
+          fields: fields.join(","),
+        },
+      },
+    ]);
+
+    return { content: [{ type: "text", text: `Styled "${find_text}" in "${tab.tabProperties.title}" (${fields.join(", ")}).` }] };
+  }
+);
+
+// ─── Tool 7: Make bullets / numbered list ─────────────────────────────────────
+
+server.registerTool(
+  "gdocs_make_bullets",
+  {
+    title: "Convert Paragraphs to Native Bullets",
+    description: `Turn one or more existing paragraphs into a real, native bulleted or numbered list. Applies to every paragraph the range touches.
+Args:
+  - tab_name: Exact tab name. Optional when the doc has a single tab.
+  - start_text: Text on the FIRST line to bullet (first match).
+  - end_text: Optional text on the LAST line to bullet. Omit to bullet only the start line. Pass the first and last item to bullet a whole section at once.
+  - preset: Optional bullet style. Default "BULLET_DISC_CIRCLE_SQUARE" (round bullets). Other options include "BULLET_CHECKBOX", "BULLET_ARROW_DIAMOND_DISC", "NUMBERED_DECIMAL_ALPHA_ROMAN".
+  - doc: A Google Doc URL or ID; "todo" (default) and "radhika" are shortcuts.
+Returns: Confirmation, or an error if the text was not found.`,
+    inputSchema: z.object({
+      tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
+      start_text: z.string().min(1).describe("Text on the first line to bullet"),
+      end_text: z.string().optional().describe("Text on the last line to bullet (omit for a single line)"),
+      preset: z.string().optional().describe('Bullet preset. Default "BULLET_DISC_CIRCLE_SQUARE".'),
+      doc: docArg,
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ tab_name, start_text, end_text, preset, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
+
+    const startLoc = findTextInTab(tab, start_text);
+    if (!startLoc) {
+      return { content: [{ type: "text", text: `Could not find "${start_text}" in tab "${tab.tabProperties.title}".` }] };
+    }
+    let endIndex = startLoc.endIndex;
+    if (end_text) {
+      const endLoc = findTextInTab(tab, end_text);
+      if (!endLoc) {
+        return { content: [{ type: "text", text: `Could not find end_text "${end_text}" in tab "${tab.tabProperties.title}".` }] };
+      }
+      endIndex = Math.max(endIndex, endLoc.endIndex);
+    }
+
+    const tabId = tab.tabProperties.tabId;
+    await docsBatchUpdate(docId, [
+      {
+        createParagraphBullets: {
+          range: { startIndex: startLoc.startIndex, endIndex, tabId },
+          bulletPreset: preset || "BULLET_DISC_CIRCLE_SQUARE",
+        },
+      },
+    ]);
+
+    return { content: [{ type: "text", text: `Applied bullets (${preset || "BULLET_DISC_CIRCLE_SQUARE"}) in "${tab.tabProperties.title}".` }] };
+  }
+);
+
+// ─── Tool 8: Remove bullets ───────────────────────────────────────────────────
+
+server.registerTool(
+  "gdocs_remove_bullets",
+  {
+    title: "Remove Native Bullets",
+    description: `Strip native bullet/number formatting from paragraphs in a range, turning them back into plain paragraphs. Reverses gdocs_make_bullets.
+Args:
+  - tab_name: Exact tab name. Optional when the doc has a single tab.
+  - start_text: Text on the first line to unbullet (first match).
+  - end_text: Optional text on the last line. Omit to unbullet only the start line.
+  - doc: A Google Doc URL or ID; "todo" (default) and "radhika" are shortcuts.
+Returns: Confirmation, or an error if the text was not found.`,
+    inputSchema: z.object({
+      tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
+      start_text: z.string().min(1).describe("Text on the first line to unbullet"),
+      end_text: z.string().optional().describe("Text on the last line to unbullet (omit for a single line)"),
+      doc: docArg,
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ tab_name, start_text, end_text, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
+
+    const startLoc = findTextInTab(tab, start_text);
+    if (!startLoc) {
+      return { content: [{ type: "text", text: `Could not find "${start_text}" in tab "${tab.tabProperties.title}".` }] };
+    }
+    let endIndex = startLoc.endIndex;
+    if (end_text) {
+      const endLoc = findTextInTab(tab, end_text);
+      if (!endLoc) {
+        return { content: [{ type: "text", text: `Could not find end_text "${end_text}" in tab "${tab.tabProperties.title}".` }] };
+      }
+      endIndex = Math.max(endIndex, endLoc.endIndex);
+    }
+
+    const tabId = tab.tabProperties.tabId;
+    await docsBatchUpdate(docId, [
+      {
+        deleteParagraphBullets: {
+          range: { startIndex: startLoc.startIndex, endIndex, tabId },
+        },
+      },
+    ]);
+
+    return { content: [{ type: "text", text: `Removed bullets in "${tab.tabProperties.title}".` }] };
   }
 );
 
