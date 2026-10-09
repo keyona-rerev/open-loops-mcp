@@ -73,8 +73,24 @@ export interface StructuralElement {
   startIndex?: number;
   endIndex?: number;
   paragraph?: Paragraph;
-  table?: unknown;
+  table?: DocsTable;
   sectionBreak?: unknown;
+}
+
+export interface DocsTable {
+  rows: number;
+  columns: number;
+  tableRows: DocsTableRow[];
+}
+
+export interface DocsTableRow {
+  tableCells: DocsTableCell[];
+}
+
+export interface DocsTableCell {
+  startIndex?: number;
+  endIndex?: number;
+  content: StructuralElement[];
 }
 
 export interface Paragraph {
