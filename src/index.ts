@@ -11,9 +11,11 @@ import {
   findTextInTab,
   findInsertPointAfter,
   getTabEndIndex,
+  listTablesInTab,
+  getCellRange,
 } from "./utils";
 
-const VERSION = "2.3.0";
+const VERSION = "2.4.0";
 
 const server = new McpServer({
   name: "gdocs-mcp-server",
@@ -396,6 +398,104 @@ Returns: Confirmation, or an error if the text was not found.`,
     ]);
 
     return { content: [{ type: "text", text: `Removed bullets in "${tab.tabProperties.title}".` }] };
+  }
+);
+
+// ─── Tool 9: Read tables ────────────────────────────────────────────────────────
+
+server.registerTool(
+  "gdocs_read_tables",
+  {
+    title: "Read Tables in Tab",
+    description: `Read every top-level table in a tab as a grid of cell text. gdocs_read_tab only returns paragraph text and skips table cells; use this to see them.
+Returns JSON: for each table, table_index (0-based, document order), rows, columns, label (nearest preceding text, to help identify it), and cells[row][col] as plain text. Rows/cols are 0-based everywhere. Merged cells can make a row shorter than columns.
+Args:
+  - tab_name: Exact tab name. Optional when the doc has a single tab.
+  - doc: A Google Doc URL or document ID; "todo" (default) and "radhika" are shortcuts.`,
+    inputSchema: z.object({
+      tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
+      doc: docArg,
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ tab_name, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
+    const tables = listTablesInTab(tab);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ tab: tab.tabProperties.title, table_count: tables.length, tables }) }],
+    };
+  }
+);
+
+// ─── Tool 10: Write table cells ───────────────────────────────────────────────
+
+server.registerTool(
+  "gdocs_write_cells",
+  {
+    title: "Write Table Cells",
+    description: `Set the text of one or more table cells in a tab. Each cell's existing text is replaced (an empty string clears the cell). All edits go in one atomic batch.
+Call gdocs_read_tables first to get table_index and confirm row/col positions. Everything is 0-based. Only top-level tables are addressable. To write a single cell, pass one entry in cells.
+Args:
+  - tab_name: Exact tab name. Optional when the doc has a single tab.
+  - cells: Array of { table_index, row, col, text }. Use \\n inside text for line breaks within a cell.
+  - doc: A Google Doc URL or document ID; "todo" (default) and "radhika" are shortcuts.
+Returns: Confirmation with the number of cells written, or an error naming the bad coordinate (nothing is written if any coordinate is bad).`,
+    inputSchema: z.object({
+      tab_name: z.string().optional().describe("Exact tab name. Optional if the doc has only one tab."),
+      cells: z
+        .array(
+          z.object({
+            table_index: z.number().int().min(0).describe("0-based table index from gdocs_read_tables"),
+            row: z.number().int().min(0).describe("0-based row"),
+            col: z.number().int().min(0).describe("0-based column"),
+            text: z.string().describe("New cell text (empty string clears)"),
+          })
+        )
+        .min(1)
+        .describe("Cells to write"),
+      doc: docArg,
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ tab_name, cells, doc }) => {
+    const { docId, error } = resolveDocId(doc);
+    if (error) return { content: [{ type: "text", text: error }] };
+    const docData = await docsGet(docId);
+    const { tab, error: tabErr } = resolveTab(docData, tab_name);
+    if (!tab) return { content: [{ type: "text", text: tabErr ?? "Tab not found." }] };
+
+    const tabId = tab.tabProperties.tabId;
+    const seen = new Set<string>();
+    const ops: { start: number; end: number; text: string }[] = [];
+    for (const c of cells) {
+      const key = `${c.table_index}:${c.row}:${c.col}`;
+      if (seen.has(key)) {
+        return { content: [{ type: "text", text: `Duplicate cell in request: table ${c.table_index}, row ${c.row}, col ${c.col}. Nothing written.` }] };
+      }
+      seen.add(key);
+      const { range, error: cellErr } = getCellRange(tab, c.table_index, c.row, c.col);
+      if (!range) return { content: [{ type: "text", text: `${cellErr} Nothing written.` }] };
+      ops.push({ start: range.start, end: range.end, text: c.text });
+    }
+
+    // Apply from the end of the document backwards so earlier indexes stay valid.
+    ops.sort((a, b) => b.start - a.start);
+    const requests: unknown[] = [];
+    for (const op of ops) {
+      if (op.end > op.start) {
+        requests.push({ deleteContentRange: { range: { startIndex: op.start, endIndex: op.end, tabId } } });
+      }
+      if (op.text.length > 0) {
+        requests.push({ insertText: { text: op.text, location: { index: op.start, tabId } } });
+      }
+    }
+    if (requests.length > 0) await docsBatchUpdate(docId, requests);
+
+    return { content: [{ type: "text", text: `Wrote ${cells.length} cell(s) in "${tab.tabProperties.title}".` }] };
   }
 );
 
