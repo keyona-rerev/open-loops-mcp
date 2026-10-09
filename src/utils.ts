@@ -121,6 +121,78 @@ export function paragraphToText(para: Paragraph): string {
   return para.elements.map((e) => e.textRun?.content ?? "").join("");
 }
 
+// ─── Table helpers ────────────────────────────────────────────────────────────
+
+export interface TableInfo {
+  tableIndex: number;
+  rows: number;
+  columns: number;
+  label: string;
+  cells: string[][];
+}
+
+function cellToText(cell: { content: StructuralElement[] }): string {
+  return (cell.content ?? [])
+    .map(elementToText)
+    .join("")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\n$/, "");
+}
+
+/** Top-level tables in a tab body, in document order, with a nearby text label. */
+export function listTablesInTab(tab: DocsTab): TableInfo[] {
+  const content = tab.documentTab?.body?.content ?? [];
+  const out: TableInfo[] = [];
+  let lastText = "";
+  for (const el of content) {
+    if (el.paragraph) {
+      const t = paragraphToText(el.paragraph).trim();
+      if (t) lastText = t;
+    } else if (el.table) {
+      out.push({
+        tableIndex: out.length,
+        rows: el.table.rows,
+        columns: el.table.columns,
+        label: lastText.slice(0, 80),
+        cells: el.table.tableRows.map((r) => r.tableCells.map(cellToText)),
+      });
+    }
+  }
+  return out;
+}
+
+export interface CellRange {
+  start: number; // first index inside the cell
+  end: number; // index of the cell's final newline (exclusive end of editable text)
+}
+
+/** Editable range of one cell (0-based table/row/col). Null if out of range. */
+export function getCellRange(
+  tab: DocsTab,
+  tableIndex: number,
+  row: number,
+  col: number
+): { range: CellRange | null; error?: string } {
+  const content = tab.documentTab?.body?.content ?? [];
+  const tables = content.filter((el) => el.table);
+  const el = tables[tableIndex];
+  if (!el || !el.table) {
+    return { range: null, error: `table_index ${tableIndex} not found (tab has ${tables.length} top-level table(s)).` };
+  }
+  const r = el.table.tableRows[row];
+  if (!r) return { range: null, error: `row ${row} not found (table has ${el.table.tableRows.length} rows, 0-based).` };
+  const cell = r.tableCells[col];
+  if (!cell) return { range: null, error: `col ${col} not found in row ${row} (row has ${r.tableCells.length} cells, 0-based).` };
+  const paras = cell.content ?? [];
+  const first = paras[0];
+  const last = paras[paras.length - 1];
+  if (!first || first.startIndex === undefined || !last || last.endIndex === undefined) {
+    return { range: null, error: `Could not determine range for cell (${row},${col}).` };
+  }
+  return { range: { start: first.startIndex, end: last.endIndex - 1 } };
+}
+
 // ─── Index finding ────────────────────────────────────────────────────────────
 
 export interface TextLocation {
